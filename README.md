@@ -21,7 +21,7 @@ First, update your system and ensure `git` and `python3` are installed:
 ```bash
 sudo apt update && sudo apt install git python3 -y
 
-git clone [https://github.com/amircpuir/Linux-Tunnel-Manager.git](https://github.com/amircpuir/Linux-Tunnel-Manager.git)
+git clone https://github.com/amircpuir/Linux-Tunnel-Manager.git
 
 cd Linux-Tunnel-Manager
 
