@@ -58,51 +58,8 @@ An advanced, enterprise-grade Python CLI suite to benchmark, deploy, and manage 
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amircpuir/Linux-Tunnel-Manager/main/tunnel.py -o tunnel.py && chmod +x tunnel.py && sudo python3 tunnel.py
+```
 
-Method 2: Git Clone
-code
-Bash
-# Update package list and install dependencies
-sudo apt update && sudo apt install -y git python3 iptables iproute2
-
-# Clone repository
-git clone https://github.com/amircpuir/Linux-Tunnel-Manager.git
-
-# Navigate into directory
-cd Linux-Tunnel-Manager
-
-# Run script with root privileges
-sudo python3 tunnel.py
-🎮 CLI Arguments & Fast Execution
-You can run the script interactively or pass command-line arguments:
-code
-Bash
-# Start Server Listener (Run on Foreign / Destination Server):
-sudo python3 tunnel.py --role server --port 9876
-
-# Run Synchronized Benchmark (Run on Local / Iran Server):
-sudo python3 tunnel.py --role client --remote <REMOTE_SERVER_IP>
-
-# Clean all virtual test interfaces:
-sudo python3 tunnel.py --role clean
-📋 Interactive Menu Overview
-code
-Text
-==============================
- Tunnel Manager & Benchmark
-==============================
-1) Run Benchmark (Client)
-2) Start Listener (Server)
-3) Create Tunnel
-4) Tunnel Routing & Forwarding
-5) Delete Tunnel
-6) Change Tunnel IP
-7) Port Forwarding
-8) Optimize Network
-9) Clean Interfaces
-0) Exit
-------------------------------
-<div dir="rtl">
 🇮🇷 راهنمای فارسی (توضیحات و امکانات نسخه جدید)
 اسکریپت Linux Tunnel & Benchmark Manager یک ابزار حرفه‌ای و جامع برای تست، ساخت، روتینگ و مدیریت انواع تانل‌های شبکه بین سرورهای لینوکسی (به ویژه سرور ایران و خارج) است.
 قابلیت‌های کلیدی نسخه جدید:
