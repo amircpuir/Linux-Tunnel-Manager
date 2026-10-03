@@ -60,9 +60,3 @@ An advanced, enterprise-grade Python CLI suite to benchmark, deploy, and manage 
 curl -fsSL https://raw.githubusercontent.com/amircpuir/Linux-Tunnel-Manager/main/tunnel.py -o tunnel.py && chmod +x tunnel.py && sudo python3 tunnel.py
 ```
 
-حل مشکل بازگشت پکت‌ها با فعال‌سازی خودکار POSTROUTING MASQUERADE.
-ذخیره دائمی قوانین در فایل JSON و امکان حذف بر اساس شماره رول.
-</div>
-📄 License
-This project is licensed under the MIT License. Feel free to use and contribute.
-Created with ❤️ by Ultra Tunnel Team (@Telhost1)
