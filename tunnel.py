@@ -550,9 +550,75 @@ def sig_handler(sig, frame):
 signal.signal(signal.SIGINT, sig_handler)
 signal.signal(signal.SIGTERM, sig_handler)
 
+class TcpReceiverThread(threading.Thread):
+    def __init__(self, port: int, duration_sec: int):
+        super().__init__()
+        self.daemon = True
+        self.port = port
+        self.duration_sec = duration_sec
+        self.total_bytes = 0
+        self.stop_event = threading.Event()
+        self.ready_event = threading.Event()
+
+    def run(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            server.bind(("0.0.0.0", self.port))
+            server.listen(16)
+            server.settimeout(0.5)
+            self.ready_event.set()
+        except Exception:
+            self.ready_event.set()
+            return
+
+        threads = []
+        def worker(conn):
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            conn.settimeout(1.0)
+            chunk = 64 * 1024
+            try:
+                while not self.stop_event.is_set():
+                    data = conn.recv(chunk)
+                    if not data:
+                        break
+                    self.total_bytes += len(data)
+            except Exception:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        end = time.time() + self.duration_sec + 2.0
+        while time.time() < end and not self.stop_event.is_set():
+            try:
+                c, _ = server.accept()
+                t = threading.Thread(target=worker, args=(c,))
+                t.daemon = True
+                t.start()
+                threads.append(t)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+        try:
+            server.close()
+        except Exception:
+            pass
+        for t in threads:
+            t.join(timeout=0.2)
+
+    def stop(self) -> int:
+        self.stop_event.set()
+        self.join(timeout=1.0)
+        return self.total_bytes
+
 class BenchmarkEngine:
     @staticmethod
-    def ping(my_ip: str, target_ip: str, count: int = 6) -> Dict[str, Any]:
+    def ping(my_ip: str, target_ip: str, count: int = 5) -> Dict[str, Any]:
         cmd = f"ping -I {my_ip} -c {count} -W 1 -i 0.2 {target_ip}"
         ok, out = run_cmd(cmd)
         if not ok or not out:
@@ -581,106 +647,101 @@ class BenchmarkEngine:
         return {"success": loss < 100.0, "loss_pct": loss, "avg_ms": avg_rtt}
 
     @staticmethod
-    def start_iperf_server(bind_ip: str, port: int) -> subprocess.Popen:
-        run_cmd("pkill -9 -f 'iperf3.*-s' 2>/dev/null")
-        cmd = f"iperf3 -s -B {bind_ip} -p {port} -1"
-        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(0.3)
-        return proc
+    def start_iperf_server(port: int = STREAM_PORT) -> Optional[subprocess.Popen]:
+        run_cmd("pkill -9 iperf3 2>/dev/null")
+        cmd = ["iperf3", "-s", "-p", str(port), "-1"]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid
+            )
+            time.sleep(0.3)
+            return proc
+        except Exception:
+            return None
 
     @staticmethod
-    def run_iperf_client(target_ip: str, bind_ip: str, port: int, duration_sec: int) -> Optional[float]:
-        cmd = f"iperf3 -c {target_ip} -B {bind_ip} -p {port} -t {duration_sec} -P 4 -J"
-        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    def run_iperf_client(target_ip: str, port: int, duration_sec: int, bind_ip: Optional[str] = None) -> Optional[float]:
+        run_cmd("pkill -9 -f 'iperf3.*-c' 2>/dev/null")
+        cmd = ["iperf3", "-c", target_ip, "-p", str(port), "-t", str(duration_sec), "-P", "2", "-J"]
+        if bind_ip and bind_ip not in ["0.0.0.0", "127.0.0.1"]:
+            cmd.extend(["-B", bind_ip])
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                preexec_fn=os.setsid
+            )
+        except Exception:
+            return None
 
         start = time.time()
+        max_duration = duration_sec + 2
         while proc.poll() is None:
             elapsed = int(time.time() - start)
-            if elapsed > duration_sec + 4:
-                proc.kill()
+            if elapsed >= max_duration:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
                 break
             pct = min(100, int((elapsed / duration_sec) * 100))
-            sys.stdout.write(f"\rTesting bandwidth... {pct}% ({elapsed}s/{duration_sec}s)")
+            sys.stdout.write(f"\rTesting bandwidth... {pct}% ({min(elapsed, duration_sec)}s/{duration_sec}s)")
             sys.stdout.flush()
-            time.sleep(0.3)
+            time.sleep(0.25)
 
-        stdout, _ = proc.communicate()
-        sys.stdout.write("\r" + " " * 40 + "\r")
+        try:
+            stdout, _ = proc.communicate(timeout=1.0)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            stdout = ""
+
+        sys.stdout.write("\r" + " " * 45 + "\r")
         sys.stdout.flush()
 
-        if proc.returncode == 0 and stdout:
+        if stdout:
             try:
                 data = json.loads(stdout)
                 bps = data.get("end", {}).get("sum_sent", {}).get("bits_per_second")
                 if not bps:
                     bps = data.get("end", {}).get("sum_received", {}).get("bits_per_second")
-                if bps:
+                if bps and float(bps) > 0:
                     return float(bps)
             except Exception:
                 pass
         return None
 
     @staticmethod
-    def run_tcp_receiver(listen_ip: str, port: int, duration_sec: int, stop_event: threading.Event) -> int:
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((listen_ip, port))
-        server.listen(16)
-        server.settimeout(1.0)
-        total = [0]
-
-        def worker(conn):
-            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            conn.settimeout(2.0)
-            chunk = 128 * 1024
-            try:
-                while not stop_event.is_set():
-                    data = conn.recv(chunk)
-                    if not data:
-                        break
-                    total[0] += len(data)
-            except Exception:
-                pass
-            finally:
-                conn.close()
-
-        threads = []
-        end = time.time() + duration_sec + 1.5
-        while time.time() < end and not stop_event.is_set():
-            try:
-                c, _ = server.accept()
-                t = threading.Thread(target=worker, args=(c,))
-                t.daemon = True
-                t.start()
-                threads.append(t)
-            except socket.timeout:
-                continue
-            except Exception:
-                break
-
-        server.close()
-        for t in threads:
-            t.join(timeout=0.3)
-        return total[0]
-
-    @staticmethod
-    def run_tcp_sender(target_ip: str, port: int, duration_sec: int, streams: int = 4) -> float:
-        payload = b"X" * (128 * 1024)
+    def run_tcp_sender(target_ip: str, port: int, duration_sec: int, streams: int = 2) -> float:
+        payload = b"X" * (64 * 1024)
         stop_event = threading.Event()
         total = [0]
 
         def worker():
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.settimeout(2.0)
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                s.settimeout(3.0)
                 s.connect((target_ip, port))
+                s.settimeout(0.5)
                 while not stop_event.is_set():
                     s.sendall(payload)
                     total[0] += len(payload)
-                s.close()
             except Exception:
                 pass
+            finally:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
         threads = []
         for _ in range(streams):
@@ -692,16 +753,16 @@ class BenchmarkEngine:
         start = time.time()
         try:
             while time.time() - start < duration_sec:
-                time.sleep(0.3)
+                time.sleep(0.25)
                 elapsed = int(time.time() - start)
                 pct = min(100, int((elapsed / duration_sec) * 100))
-                sys.stdout.write(f"\rTesting bandwidth... {pct}% ({elapsed}s/{duration_sec}s)")
+                sys.stdout.write(f"\rTesting bandwidth... {pct}% ({min(elapsed, duration_sec)}s/{duration_sec}s)")
                 sys.stdout.flush()
         finally:
             stop_event.set()
             for t in threads:
                 t.join(timeout=0.5)
-            sys.stdout.write("\r" + " " * 40 + "\r")
+            sys.stdout.write("\r" + " " * 45 + "\r")
             sys.stdout.flush()
 
         elapsed_total = max(0.1, time.time() - start)
@@ -819,6 +880,7 @@ def run_server_mode(port: int = SYNC_PORT, bind_ip: str = "0.0.0.0", preset_ip: 
 
                 dev = "tun_bench"
                 peer_wg_pub = msg.get("wg_pub_key", "")
+                active_tcp_receiver = None
 
                 try:
                     while True:
@@ -895,14 +957,29 @@ def run_server_mode(port: int = SYNC_PORT, bind_ip: str = "0.0.0.0", preset_ip: 
                             use_iperf = cmd.get("use_iperf3", False) and bool(shutil.which("iperf3"))
 
                             if use_iperf:
-                                BenchmarkEngine.start_iperf_server(SUBNET_REMOTE, s_port)
+                                BenchmarkEngine.start_iperf_server(s_port)
                                 send_msg(conn, {"status": "IPERF3_READY"})
                             else:
-                                ev = threading.Event()
-                                rx = BenchmarkEngine.run_tcp_receiver("0.0.0.0", s_port, dur, ev)
-                                send_msg(conn, {"status": "FINISHED", "bytes_rx": rx})
+                                if active_tcp_receiver:
+                                    active_tcp_receiver.stop()
+                                active_tcp_receiver = TcpReceiverThread(s_port, dur + 2)
+                                active_tcp_receiver.start()
+                                active_tcp_receiver.ready_event.wait(timeout=1.0)
+                                send_msg(conn, {"status": "TCP_READY"})
+
+                        elif act == "STOP_BANDWIDTH_TEST":
+                            run_cmd("pkill -9 iperf3 2>/dev/null")
+                            rx_b = 0
+                            if active_tcp_receiver:
+                                rx_b = active_tcp_receiver.stop()
+                                active_tcp_receiver = None
+                            send_msg(conn, {"status": "OK", "bytes_rx": rx_b})
 
                         elif act == "TEARDOWN_TUNNEL":
+                            if active_tcp_receiver:
+                                active_tcp_receiver.stop()
+                                active_tcp_receiver = None
+                            run_cmd("pkill -9 iperf3 2>/dev/null")
                             TunnelDriver.cleanup_interface(dev)
                             send_msg(conn, {"status": "OK"})
 
@@ -1130,17 +1207,21 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT,
                 "duration": TEST_DURATION,
                 "use_iperf3": use_iperf
             })
-            recv_msg(sock, timeout=10.0)
+            bw_ready = recv_msg(sock, timeout=5.0)
+            server_bw_mode = bw_ready.get("status") if bw_ready else ""
 
             measured_bps = 0.0
-            if use_iperf:
-                ibps = BenchmarkEngine.run_iperf_client(SUBNET_REMOTE, SUBNET_LOCAL, stream_port, TEST_DURATION)
+            if server_bw_mode == "IPERF3_READY":
+                ibps = BenchmarkEngine.run_iperf_client(SUBNET_REMOTE, stream_port, TEST_DURATION)
                 if ibps and ibps > 0:
                     measured_bps = ibps
                 else:
                     measured_bps = BenchmarkEngine.run_tcp_sender(SUBNET_REMOTE, stream_port, TEST_DURATION)
             else:
                 measured_bps = BenchmarkEngine.run_tcp_sender(SUBNET_REMOTE, stream_port, TEST_DURATION)
+
+            send_msg(sock, {"action": "STOP_BANDWIDTH_TEST"})
+            recv_msg(sock, timeout=3.0)
 
             TunnelDriver.cleanup_interface(dev)
             send_msg(sock, {"action": "TEARDOWN_TUNNEL"})
@@ -1919,7 +2000,7 @@ def main():
 
     while True:
         print("\n==============================")
-        print(" Linux Tunnel Manager V2.2 ")
+        print(" Linux Tunnel Manager V2.3 ")
         print(" Channel : @Telhost1 ")
         print("Buy a Vps : pasargadcloud.ir")
         print("==============================")
