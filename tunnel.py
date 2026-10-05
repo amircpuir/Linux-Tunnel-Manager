@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+# -*- coding: utf-8 -*-
 
 import os
 import sys
@@ -127,6 +127,9 @@ def get_all_local_ips() -> List[str]:
                 if ip_addr not in ["127.0.0.1", "0.0.0.0"] and not ip_addr.startswith("10.99.1.") and not ip_addr.startswith("10.0.0."):
                     if ip_addr not in ips:
                         ips.append(ip_addr)
+    pub = get_public_ip()
+    if pub and pub not in ["0.0.0.0", "127.0.0.1"] and not pub.startswith("10.99.1.") and not pub.startswith("10.0.0.") and pub not in ips:
+        ips.append(pub)
     return ips
 
 def get_default_gw() -> Tuple[str, str]:
@@ -384,15 +387,16 @@ class TunnelDriver:
         return True
 
     @staticmethod
-    def setup_vxlan(dev: str, remote_ip: str, my_ip: str, peer_ip: str, mtu: int, dst_port: int = 4789, vni: int = 100, is_server: bool = False) -> bool:
+    def setup_vxlan(dev: str, remote_ip: str, my_ip: str, peer_ip: str, mtu: int, dst_port: int = 4789, vni: int = 100, is_server: bool = False, local_bind: Optional[str] = None) -> bool:
         TunnelDriver.cleanup_interface(dev)
         run_cmd("modprobe vxlan 2>/dev/null")
         run_cmd(f"iptables -I INPUT 1 -p udp --dport {dst_port} -j ACCEPT 2>/dev/null")
         run_cmd("iptables -I INPUT 1 -p icmp -j ACCEPT 2>/dev/null")
-        cmd = f"ip link add {dev} type vxlan id {vni} remote {remote_ip} dstport {dst_port}"
+        loc_arg = f"local {local_bind} " if local_bind and local_bind not in ["0.0.0.0", "127.0.0.1"] else ""
+        cmd = f"ip link add {dev} type vxlan id {vni} remote {remote_ip} {loc_arg}dstport {dst_port}"
         ok, _ = run_cmd(cmd)
-        if not ok:
-            cmd = f"ip link add {dev} type vxlan id {vni} dstport {dst_port}"
+        if not ok and loc_arg:
+            cmd = f"ip link add {dev} type vxlan id {vni} remote {remote_ip} dstport {dst_port}"
             ok, _ = run_cmd(cmd)
         if not ok:
             return False
@@ -414,13 +418,17 @@ class TunnelDriver:
         return True
 
     @staticmethod
-    def setup_geneve(dev: str, remote_ip: str, my_ip: str, peer_ip: str, mtu: int, dst_port: int = 6081, vni: int = 100, is_server: bool = False) -> bool:
+    def setup_geneve(dev: str, remote_ip: str, my_ip: str, peer_ip: str, mtu: int, dst_port: int = 6081, vni: int = 100, is_server: bool = False, local_bind: Optional[str] = None) -> bool:
         TunnelDriver.cleanup_interface(dev)
         run_cmd("modprobe geneve 2>/dev/null")
         run_cmd(f"iptables -I INPUT 1 -p udp --dport {dst_port} -j ACCEPT 2>/dev/null")
         run_cmd("iptables -I INPUT 1 -p icmp -j ACCEPT 2>/dev/null")
-        cmd = f"ip link add {dev} type geneve id {vni} remote {remote_ip} dstport {dst_port}"
+        loc_arg = f"local {local_bind} " if local_bind and local_bind not in ["0.0.0.0", "127.0.0.1"] else ""
+        cmd = f"ip link add {dev} type geneve id {vni} remote {remote_ip} {loc_arg}dstport {dst_port}"
         ok, _ = run_cmd(cmd)
+        if not ok and loc_arg:
+            cmd = f"ip link add {dev} type geneve id {vni} remote {remote_ip} dstport {dst_port}"
+            ok, _ = run_cmd(cmd)
         if not ok:
             return False
 
@@ -474,10 +482,11 @@ class TunnelDriver:
         run_cmd(f"ip l2tp del session tunnel_id {tid} session_id {tid} 2>/dev/null")
         run_cmd(f"ip l2tp del tunnel tunnel_id {tid} 2>/dev/null")
 
-        cmd = f"ip l2tp add tunnel tunnel_id {tid} peer_tunnel_id {ptid} encap udp local any remote {remote_ip} udp_sport {port} udp_dport {port}"
+        loc_arg = f"local {local_bind}" if local_bind and local_bind not in ["0.0.0.0", "127.0.0.1"] else "local any"
+        cmd = f"ip l2tp add tunnel tunnel_id {tid} peer_tunnel_id {ptid} encap udp {loc_arg} remote {remote_ip} udp_sport {port} udp_dport {port}"
         ok, _ = run_cmd(cmd)
-        if not ok:
-            cmd = f"ip l2tp add tunnel tunnel_id {tid} peer_tunnel_id {ptid} encap udp local {local_bind} remote {remote_ip} udp_sport {port} udp_dport {port}"
+        if not ok and loc_arg != "local any":
+            cmd = f"ip l2tp add tunnel tunnel_id {tid} peer_tunnel_id {ptid} encap udp local any remote {remote_ip} udp_sport {port} udp_dport {port}"
             ok, _ = run_cmd(cmd)
         if not ok:
             return False
@@ -698,26 +707,66 @@ class BenchmarkEngine:
         elapsed_total = max(0.1, time.time() - start)
         return (total[0] * 8) / elapsed_total
 
-def run_server_mode(port: int = SYNC_PORT):
+def run_server_mode(port: int = SYNC_PORT, bind_ip: str = "0.0.0.0", preset_ip: Optional[str] = None):
     check_root()
     install_deps()
     optimize_sysctl()
     pub_ip = get_public_ip()
 
-    print(f"Server mode started. Listening on port {port}...")
+    local_ips = get_all_local_ips()
+    default_ip = get_route_ip("8.8.8.8")
+    if (not default_ip or default_ip in ["0.0.0.0", "127.0.0.1"]) and pub_ip not in ["0.0.0.0", "127.0.0.1"]:
+        default_ip = pub_ip
+
+    selected_ip = preset_ip
+    if not selected_ip:
+        if len(local_ips) > 1:
+            print("\n==========================================")
+            print(" Detected Local IPs on this server:")
+            print("==========================================")
+            for idx, lip in enumerate(local_ips, 1):
+                tag = " (Default route / Public)" if lip in [default_ip, pub_ip] else ""
+                print(f"  {idx}) {lip}{tag}")
+            print(f"  0) All interfaces (0.0.0.0)")
+            sel = input(f"\nSelect Local IP for server listener & test [1-{len(local_ips)}, Default: {default_ip}]: ").strip()
+            if sel.isdigit():
+                val = int(sel)
+                if 1 <= val <= len(local_ips):
+                    selected_ip = local_ips[val - 1]
+                elif val == 0:
+                    selected_ip = "0.0.0.0"
+            elif sel:
+                selected_ip = sel
+            else:
+                selected_ip = default_ip
+        elif len(local_ips) == 1:
+            print(f"\nDetected Local IP on this server: {default_ip}")
+            sel = input(f"Select Local IP for server listener & test [Default: {default_ip}]: ").strip()
+            selected_ip = sel if sel else default_ip
+        else:
+            selected_ip = default_ip
+
+    bind_ip = selected_ip or "0.0.0.0"
+    listen_ip = bind_ip if bind_ip != "0.0.0.0" else "0.0.0.0"
+
+    print(f"\nServer mode started. Listening on {listen_ip}:{port} (Active IP: {bind_ip})...")
     open_firewall({"sync": port, "stream": STREAM_PORT})
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_sock.bind(('0.0.0.0', port))
-    server_sock.listen(1)
+    try:
+        server_sock.bind((listen_ip, port))
+    except Exception as e:
+        print(f"Warning: Could not bind directly to {listen_ip}:{port} ({e}), listening on 0.0.0.0")
+        server_sock.bind(("0.0.0.0", port))
+    server_sock.listen(5)
 
     try:
         while True:
             try:
                 conn, addr = server_sock.accept()
                 peer_addr = addr[0]
-                print(f"Connection received from {peer_addr}")
+                sock_local_ip = conn.getsockname()[0]
 
                 msg = recv_msg(conn, timeout=15.0)
                 if not msg or msg.get("action") != "HELLO":
@@ -728,6 +777,18 @@ def run_server_mode(port: int = SYNC_PORT):
                 if not peer_pub or peer_pub in ["0.0.0.0", "127.0.0.1"]:
                     peer_pub = peer_addr
 
+                target_server_ip = msg.get("target_server_ip")
+                if bind_ip and bind_ip not in ["0.0.0.0", "127.0.0.1"]:
+                    server_ip = bind_ip
+                elif target_server_ip and target_server_ip not in ["0.0.0.0", "127.0.0.1"]:
+                    server_ip = target_server_ip
+                elif sock_local_ip not in ["0.0.0.0", "127.0.0.1"]:
+                    server_ip = sock_local_ip
+                else:
+                    server_ip = pub_ip
+
+                print(f"\nConnection received from {peer_addr} (Client IP: {peer_pub}) on local server IP {server_ip}")
+
                 configured_ports = msg.get("ports", {
                     "wireguard": 51820,
                     "vxlan": 4789,
@@ -736,7 +797,11 @@ def run_server_mode(port: int = SYNC_PORT):
                     "stream": STREAM_PORT
                 })
 
-                local_route = get_route_ip(peer_pub)
+                local_route = server_ip
+                gw, phys_dev = get_default_gw()
+                if gw and phys_dev and local_route and local_route not in ["0.0.0.0", "127.0.0.1"]:
+                    run_cmd(f"ip route replace {peer_pub} via {gw} dev {phys_dev} src {local_route} 2>/dev/null")
+
                 base_mtu = get_base_mtu(peer_pub)
                 wg_priv, wg_pub = gen_wg_keys()
 
@@ -744,7 +809,7 @@ def run_server_mode(port: int = SYNC_PORT):
 
                 send_msg(conn, {
                     "status": "READY",
-                    "server_pub_ip": pub_ip if pub_ip not in ["0.0.0.0", "127.0.0.1"] else "",
+                    "server_pub_ip": server_ip if server_ip not in ["0.0.0.0", "127.0.0.1"] else pub_ip,
                     "peer_detected_ip": peer_addr,
                     "server_routing_ip": local_route,
                     "base_mtu": base_mtu,
@@ -794,7 +859,8 @@ def run_server_mode(port: int = SYNC_PORT):
                                     peer_ip=SUBNET_LOCAL,
                                     mtu=mtu,
                                     dst_port=configured_ports.get("vxlan", 4789),
-                                    is_server=True
+                                    is_server=True,
+                                    local_bind=local_route
                                 )
                             elif proto == "geneve":
                                 ok = TunnelDriver.setup_geneve(
@@ -804,7 +870,8 @@ def run_server_mode(port: int = SYNC_PORT):
                                     peer_ip=SUBNET_LOCAL,
                                     mtu=mtu,
                                     dst_port=configured_ports.get("geneve", 6081),
-                                    is_server=True
+                                    is_server=True,
+                                    local_bind=local_route
                                 )
                             elif proto == "sit":
                                 ok = TunnelDriver.setup_sit(dev, local_route, peer_pub, SUBNET_REMOTE, SUBNET_LOCAL, mtu)
@@ -859,7 +926,7 @@ def run_server_mode(port: int = SYNC_PORT):
         server_sock.close()
         auto_cleanup(verbose=True)
 
-def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT):
+def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT, local_ip_choice: Optional[str] = None):
     check_root()
     install_deps()
     optimize_sysctl()
@@ -871,9 +938,34 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT)
         print("Error: Remote IP required.")
         return
 
-    print(f"Connecting to {remote_ip}:{sync_port}...")
-    local_pub = get_public_ip()
-    local_route = get_route_ip(remote_ip)
+    local_ips = get_all_local_ips()
+    default_ip = get_route_ip(remote_ip)
+    local_bind = local_ip_choice or default_ip
+
+    if not local_ip_choice:
+        if len(local_ips) > 1:
+            print("\n==========================================")
+            print(" Detected Local IPs on this server:")
+            print("==========================================")
+            for idx, lip in enumerate(local_ips, 1):
+                tag = " (Default route)" if lip == default_ip else ""
+                print(f"  {idx}) {lip}{tag}")
+            sel = input(f"\nSelect Local IP to test with [1-{len(local_ips)}, Default: {default_ip}]: ").strip()
+            if sel.isdigit() and 1 <= int(sel) <= len(local_ips):
+                local_bind = local_ips[int(sel) - 1]
+            elif sel.strip():
+                local_bind = sel.strip()
+        elif len(local_ips) == 1:
+            print(f"\nDetected Local IP on this server: {default_ip}")
+            sel = input(f"Select Local IP to test with [Default: {default_ip}]: ").strip()
+            if sel.strip():
+                local_bind = sel.strip()
+
+    gw, phys_dev = get_default_gw()
+    if gw and phys_dev and local_bind and local_bind not in ["0.0.0.0", "127.0.0.1"]:
+        run_cmd(f"ip route replace {remote_ip} via {gw} dev {phys_dev} src {local_bind} 2>/dev/null")
+
+    print(f"\nConnecting from {local_bind} to {remote_ip}:{sync_port}...")
     local_mtu = get_base_mtu(remote_ip)
 
     ports = {
@@ -886,6 +978,12 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT)
     }
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if local_bind and local_bind not in ["0.0.0.0", "127.0.0.1"]:
+        try:
+            sock.bind((local_bind, 0))
+        except Exception:
+            pass
     sock.settimeout(10.0)
     try:
         sock.connect((remote_ip, sync_port))
@@ -897,8 +995,9 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT)
 
     send_msg(sock, {
         "action": "HELLO",
-        "public_ip": local_pub if local_pub not in ["0.0.0.0", "127.0.0.1"] else "",
-        "routing_ip": local_route,
+        "public_ip": local_bind if local_bind not in ["0.0.0.0", "127.0.0.1"] else "",
+        "routing_ip": local_bind,
+        "target_server_ip": remote_ip,
         "base_mtu": local_mtu,
         "wg_pub_key": wg_pub,
         "ports": ports
@@ -914,6 +1013,7 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT)
     remote_wg_pub = resp.get("wg_pub_key", "")
     use_iperf = resp.get("has_iperf3", False) and bool(shutil.which("iperf3"))
 
+    tunnel_remote_ip = remote_ip
     safe_mtu = get_safe_mtu(min(local_mtu, remote_mtu))
     open_firewall(ports)
 
@@ -921,7 +1021,7 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT)
     dev = "tun_bench"
     stream_port = ports["stream"]
 
-    print(f"\nRunning 5s benchmark per protocol (MTU: {safe_mtu})...\n")
+    print(f"\nRunning 5s benchmark per protocol (Local IP: {local_bind}, Remote IP: {tunnel_remote_ip}, MTU: {safe_mtu})...\n")
 
     try:
         for p in PROTOCOLS:
@@ -948,47 +1048,49 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT)
                     dev=dev,
                     priv_key=wg_priv,
                     peer_pub_key=remote_wg_pub,
-                    remote_ip=remote_ip,
+                    remote_ip=tunnel_remote_ip,
                     port=ports["wireguard"],
                     my_ip=SUBNET_LOCAL,
                     peer_ip=SUBNET_REMOTE,
                     mtu=safe_mtu
                 )
             elif proto_id == "gre":
-                ok = TunnelDriver.setup_gre(dev, local_route, remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
+                ok = TunnelDriver.setup_gre(dev, local_bind, tunnel_remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
             elif proto_id == "gretap":
-                ok = TunnelDriver.setup_gretap(dev, local_route, remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
+                ok = TunnelDriver.setup_gretap(dev, local_bind, tunnel_remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
             elif proto_id == "ipip":
-                ok = TunnelDriver.setup_ipip(dev, local_route, remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
+                ok = TunnelDriver.setup_ipip(dev, local_bind, tunnel_remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
             elif proto_id == "eoip":
-                ok = TunnelDriver.setup_eoip(dev, local_route, remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
+                ok = TunnelDriver.setup_eoip(dev, local_bind, tunnel_remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
             elif proto_id == "vxlan":
                 ok = TunnelDriver.setup_vxlan(
                     dev=dev,
-                    remote_ip=remote_ip,
+                    remote_ip=tunnel_remote_ip,
                     my_ip=SUBNET_LOCAL,
                     peer_ip=SUBNET_REMOTE,
                     mtu=safe_mtu,
                     dst_port=ports["vxlan"],
-                    is_server=False
+                    is_server=False,
+                    local_bind=local_bind
                 )
             elif proto_id == "geneve":
                 ok = TunnelDriver.setup_geneve(
                     dev=dev,
-                    remote_ip=remote_ip,
+                    remote_ip=tunnel_remote_ip,
                     my_ip=SUBNET_LOCAL,
                     peer_ip=SUBNET_REMOTE,
                     mtu=safe_mtu,
                     dst_port=ports["geneve"],
-                    is_server=False
+                    is_server=False,
+                    local_bind=local_bind
                 )
             elif proto_id == "sit":
-                ok = TunnelDriver.setup_sit(dev, local_route, remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
+                ok = TunnelDriver.setup_sit(dev, local_bind, tunnel_remote_ip, SUBNET_LOCAL, SUBNET_REMOTE, safe_mtu)
             elif proto_id == "l2tp":
                 ok = TunnelDriver.setup_l2tp(
                     dev=dev,
-                    local_bind=local_route,
-                    remote_ip=remote_ip,
+                    local_bind=local_bind,
+                    remote_ip=tunnel_remote_ip,
                     my_ip=SUBNET_LOCAL,
                     peer_ip=SUBNET_REMOTE,
                     mtu=safe_mtu,
@@ -1102,8 +1204,8 @@ def show_results(results: List[Dict[str, Any]], remote_ip: str):
     except Exception:
         pass
 
-def manual_create_interactive(proto_id: str, proto_name: str):
-    remote = input("Remote Server IP: ").strip()
+def manual_create_interactive(proto_id: str, proto_name: str, preset_remote: Optional[str] = None):
+    remote = preset_remote or input("Remote Server IP: ").strip()
     if not remote:
         return
 
@@ -1112,15 +1214,22 @@ def manual_create_interactive(proto_id: str, proto_name: str):
     local_bind = default_ip
 
     if len(local_ips) > 1:
-        print("\nDetected Local IPs on this server:")
+        print("\n==========================================")
+        print(" Detected Local IPs on this server:")
+        print("==========================================")
         for idx, lip in enumerate(local_ips, 1):
             tag = " (Default route)" if lip == default_ip else ""
             print(f"  {idx}) {lip}{tag}")
-        sel = input(f"Select Local IP for tunnel [Default: {default_ip}]: ").strip()
+        sel = input(f"\nSelect Local IP for tunnel [1-{len(local_ips)}, Default: {default_ip}]: ").strip()
         if sel.isdigit() and 1 <= int(sel) <= len(local_ips):
             local_bind = local_ips[int(sel) - 1]
-        elif sel in local_ips:
-            local_bind = sel
+        elif sel.strip():
+            local_bind = sel.strip()
+    elif len(local_ips) == 1:
+        print(f"\nDetected Local IP on this server: {default_ip}")
+        sel = input(f"Select Local IP for tunnel [Default: {default_ip}]: ").strip()
+        if sel.strip():
+            local_bind = sel.strip()
 
     mtu = get_safe_mtu(get_base_mtu(remote))
     gw, phys_dev = get_default_gw()
@@ -1140,10 +1249,10 @@ def manual_create_interactive(proto_id: str, proto_name: str):
         ok = TunnelDriver.setup_wireguard(dev, priv, peer_pub, remote, port, my_ip, rem_ip, mtu)
     elif proto_id == "vxlan":
         port = int(input("Port [4789]: ").strip() or "4789")
-        ok = TunnelDriver.setup_vxlan(dev, remote, my_ip, rem_ip, mtu, port)
+        ok = TunnelDriver.setup_vxlan(dev, remote, my_ip, rem_ip, mtu, port, local_bind=local_bind)
     elif proto_id == "geneve":
         port = int(input("Port [6081]: ").strip() or "6081")
-        ok = TunnelDriver.setup_geneve(dev, remote, my_ip, rem_ip, mtu, port)
+        ok = TunnelDriver.setup_geneve(dev, remote, my_ip, rem_ip, mtu, port, local_bind=local_bind)
     elif proto_id == "sit":
         ok = TunnelDriver.setup_sit(dev, local_bind, remote, my_ip, rem_ip, mtu)
     elif proto_id == "l2tp":
@@ -1203,7 +1312,7 @@ def manual_create_interactive(proto_id: str, proto_name: str):
             )
         elif proto_id == "vxlan":
             rem_cmd = (
-                f"sudo ip link add {dev} type vxlan id 100 remote {local_bind} dstport {port} && "
+                f"sudo ip link add {dev} type vxlan id 100 remote {local_bind} local {remote} dstport {port} && "
                 f"sudo ip link set dev {dev} address 02:00:00:00:00:02 && "
                 f"sudo ip link set {dev} mtu 1350 up && "
                 f"sudo ip addr add {rem_ip}/30 dev {dev} && "
@@ -1211,6 +1320,25 @@ def manual_create_interactive(proto_id: str, proto_name: str):
                 f"sudo ip route replace {my_ip}/32 dev {dev} src {rem_ip} && "
                 f"sudo iptables -I INPUT 1 -p udp --dport {port} -j ACCEPT && sudo iptables -I INPUT 1 -p icmp -j ACCEPT && "
                 f"sudo iptables -I INPUT 1 -i {dev} -j ACCEPT && sudo iptables -I FORWARD 1 -i {dev} -j ACCEPT"
+            )
+        elif proto_id == "geneve":
+            rem_cmd = (
+                f"sudo ip link add {dev} type geneve id 100 remote {local_bind} local {remote} dstport {port} && "
+                f"sudo ip link set dev {dev} address 02:00:00:00:00:02 && "
+                f"sudo ip link set {dev} mtu 1350 up && "
+                f"sudo ip addr add {rem_ip}/30 dev {dev} && "
+                f"sudo ip neigh replace {my_ip} lladdr 02:00:00:00:00:01 dev {dev} nud permanent && "
+                f"sudo ip route replace {my_ip}/32 dev {dev} src {rem_ip} && "
+                f"sudo iptables -I INPUT 1 -p udp --dport {port} -j ACCEPT && sudo iptables -I INPUT 1 -p icmp -j ACCEPT && "
+                f"sudo iptables -I INPUT 1 -i {dev} -j ACCEPT && sudo iptables -I FORWARD 1 -i {dev} -j ACCEPT"
+            )
+        elif proto_id == "l2tp":
+            rem_cmd = (
+                f"sudo ip l2tp add tunnel tunnel_id 2000 peer_tunnel_id 1000 encap udp local {remote} remote {local_bind} udp_sport {port} udp_dport {port} && "
+                f"sudo ip l2tp add session tunnel_id 2000 session_id 2000 peer_session_id 1000 name {dev} && "
+                f"sudo ip link set dev {dev} address 02:00:00:00:00:02 mtu 1400 up && "
+                f"sudo ip addr add {rem_ip}/30 dev {dev} && "
+                f"sudo ip route replace {my_ip}/32 dev {dev} src {rem_ip}"
             )
         elif proto_id == "wireguard":
             rem_cmd = (
@@ -1765,6 +1893,7 @@ def main():
     parser.add_argument("--role", choices=["server", "client", "clean", "remote", "local"])
     parser.add_argument("--remote", help="Remote server IP")
     parser.add_argument("--remote-ip", dest="remote_ip_alias", help="Remote server IP")
+    parser.add_argument("--local-ip", dest="local_ip", help="Local IP address to test with / bind to")
     parser.add_argument("--port", type=int, default=SYNC_PORT)
     parser.add_argument("--duration", type=int, default=TEST_DURATION)
     parser.add_argument("--create", choices=[p["id"] for p in PROTOCOLS])
@@ -1775,10 +1904,14 @@ def main():
     target_ip = args.remote or args.remote_ip_alias
 
     if args.role in ["server", "remote"]:
-        run_server_mode(port=args.port)
+        run_server_mode(port=args.port, preset_ip=args.local_ip)
         return
     elif args.role in ["client", "local"]:
-        run_client_mode(remote_ip=target_ip, sync_port=args.port)
+        run_client_mode(remote_ip=target_ip, sync_port=args.port, local_ip_choice=args.local_ip)
+        return
+    elif args.create:
+        proto_name = next((p["name"] for p in PROTOCOLS if p["id"] == args.create), args.create.upper())
+        manual_create_interactive(args.create, proto_name, preset_remote=target_ip)
         return
     elif args.role == "clean":
         auto_cleanup(verbose=True)
@@ -1786,7 +1919,7 @@ def main():
 
     while True:
         print("\n==============================")
-        print(" Linux Tunnel Manager V2 ")
+        print(" Linux Tunnel Manager V2.2 ")
         print(" Channel : @Telhost1 ")
         print("Buy a Vps : pasargadcloud.ir")
         print("==============================")
@@ -1811,6 +1944,7 @@ def main():
             p_in = input(f"Port [{SYNC_PORT}]: ").strip()
             p = int(p_in) if p_in.isdigit() else SYNC_PORT
             run_server_mode(port=p)
+            input("\nPress Enter to return to menu...")
         elif choice == "3":
             manual_menu()
         elif choice == "4":
