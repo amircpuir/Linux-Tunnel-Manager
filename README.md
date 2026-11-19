@@ -108,7 +108,4 @@ sudo python3 -m ltm --create gre --remote 1.2.3.4
 - Optional: `iperf3`, `wireguard-tools` (installed on demand).
 
 ---
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+telegram: @Telhost1
