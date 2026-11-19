@@ -89,7 +89,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("remote address: %v", err)
 		}
-		conn, err := net.DialUDP("udp", nil, raddr)
+		var laddr *net.UDPAddr
+		if cfg.Local != "" {
+			if ip := net.ParseIP(cfg.Local); ip != nil {
+				laddr = &net.UDPAddr{IP: ip}
+			}
+		}
+		conn, err := net.DialUDP("udp", laddr, raddr)
 		if err != nil {
 			log.Fatalf("dial: %v", err)
 		}

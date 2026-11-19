@@ -35,14 +35,20 @@ sudo tunnel
 
 ## Features
 
-- **Benchmark** — measures throughput, latency and loss for IPIP, GRE, GRETAP,
-  EoIP, VXLAN, GENEVE, SIT/6in4, L2TPv3 and WireGuard, then ranks them.
-- **Create tunnel** — builds any supported type on this host and prints the
-  exact command to paste on the remote server.
+- **Benchmark** — measures throughput, latency and loss for Holy Tunnel,
+  IPIP, GRE, GRETAP, EoIP, VXLAN, GENEVE, SIT/6in4, L2TPv3 and WireGuard,
+  then ranks them (Holy is tested first).
+- **Create tunnel** — builds any supported type on this host (Holy first in
+  the list) and prints the exact settings/command for the remote server.
+- **Reboot-persistent** — every tunnel you create is restored automatically
+  after a reboot (a oneshot `ltm-restore` service replays them; Holy keeps its
+  own `holy-tunnel` service). Nothing has to be re-entered.
 - **Routing & forwarding** — peer routing, full-traffic routing (keeps SSH
   alive), NAT / internet sharing, diagnostics.
-- **Port forwarding** — DNAT/MASQUERADE relay rules with persistence.
-- **Holy Tunnel** — encrypted UDP tunnel, native Go core, managed by systemd.
+- **Port forwarding** — DNAT/MASQUERADE relay rules, persisted and re-applied
+  on boot.
+- **Holy Tunnel** — encrypted UDP tunnel, native Go core, local-IP based,
+  managed by systemd.
 - **Optimize** — sane sysctl tuning (BBR, buffers, forwarding) and dependency
   installation.
 
@@ -58,9 +64,11 @@ binary as its data plane (AES-256-GCM, per-datagram authentication).
   enabled on boot, so the link is re-established automatically after a reboot —
   nothing needs to be re-entered.
 
-Set it up from the menu: **8) Holy Tunnel** → configure as *Server* on the
-foreign/exit side and as *Client* on the local side, using the same shared key
-on both ends.
+Set it up from **3) Create Tunnel → Holy Tunnel** (it is the first entry):
+choose *Server* on the foreign/exit side and *Client* on the local side, using
+the same shared key on both ends. The opposite side's exact settings are
+printed for you. Menu **8) Holy Tunnel** manages the running service (status,
+logs, restart, rebuild, uninstall).
 
 Manual service control:
 
@@ -108,4 +116,7 @@ sudo python3 -m ltm --create gre --remote 1.2.3.4
 - Optional: `iperf3`, `wireguard-tools` (installed on demand).
 
 ---
-telegram: @Telhost1
+
+## License
+
+MIT — see [LICENSE](LICENSE).

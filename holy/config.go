@@ -13,6 +13,7 @@ type Config struct {
 	Role      string `json:"role"`       // "server" or "client"
 	Listen    string `json:"listen"`     // server bind, host:port
 	Remote    string `json:"remote"`     // client target, host:port
+	Local     string `json:"local"`      // local source address to bind (optional)
 	Secret    string `json:"secret"`     // shared key
 	TunName   string `json:"tun_name"`   // interface name, e.g. holy0
 	TunIP     string `json:"tun_ip"`     // local inner address, e.g. 10.200.0.1

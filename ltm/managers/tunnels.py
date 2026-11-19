@@ -5,6 +5,7 @@ from typing import Dict, List
 
 from ..core.system import run_cmd
 from ..protocols.drivers import TunnelDriver
+from . import persistence
 
 IGNORE_PREFIXES = ("lo", "eth", "ens", "enp", "wl", "docker", "br-", "veth")
 
@@ -90,6 +91,7 @@ def delete_tunnel_menu():
             target = input("Enter interface name: ").strip()
             if target:
                 TunnelDriver.cleanup_interface(target)
+                persistence.remove_tunnel(target)
                 print(f"Deleted interface {target}")
                 time.sleep(1)
         else:
@@ -98,6 +100,7 @@ def delete_tunnel_menu():
                 if 0 <= idx < len(tunnels):
                     target = tunnels[idx]["dev"]
                     TunnelDriver.cleanup_interface(target)
+                    persistence.remove_tunnel(target)
                     print(f"Deleted interface {target}")
                     time.sleep(1)
             except ValueError:

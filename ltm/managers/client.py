@@ -6,9 +6,11 @@ import time
 import json
 import shutil
 import socket
+import base64
+import secrets
 from typing import Any, Dict, List, Optional
 
-from ..config import SYNC_PORT, STREAM_PORT, TEST_DURATION, SUBNET_LOCAL, SUBNET_REMOTE
+from ..config import SYNC_PORT, STREAM_PORT, TEST_DURATION, SUBNET_LOCAL, SUBNET_REMOTE, HOLY_BENCH_PORT
 from ..core.system import check_root, install_deps, optimize_sysctl, run_cmd
 from ..core.netinfo import get_route_ip, get_all_local_ips, get_default_gw, get_base_mtu, get_safe_mtu, format_speed
 from ..core.firewall import open_firewall
@@ -17,6 +19,7 @@ from ..protocols.registry import PROTOCOLS
 from ..protocols.drivers import TunnelDriver, gen_wg_keys
 from ..protocols.cleanup import auto_cleanup
 from ..benchmark.engine import BenchmarkEngine
+from . import holy_runtime
 
 
 def _pick_local_bind(local_ips, default_ip, remote_ip):
@@ -41,7 +44,19 @@ def _pick_local_bind(local_ips, default_ip, remote_ip):
     return local_bind
 
 
-def _setup_local(proto_id, dev, local_bind, remote_ip, mtu, ports, wg_priv, remote_wg_pub):
+def _setup_local(proto_id, dev, local_bind, remote_ip, mtu, ports, wg_priv, remote_wg_pub,
+                 holder=None, holy_key=""):
+    if proto_id == "holy":
+        if not holy_runtime.ensure_core():
+            return False
+        proc = holy_runtime.start_transient(
+            "client", dev, local_bind, remote_ip, ports.get("holy", HOLY_BENCH_PORT),
+            holy_key, SUBNET_LOCAL, SUBNET_REMOTE, mtu)
+        if proc is None:
+            return False
+        if holder is not None:
+            holder["proc"] = proc
+        return True
     if proto_id == "wireguard":
         return TunnelDriver.setup_wireguard(dev, wg_priv, remote_wg_pub, remote_ip, ports["wireguard"],
                                             SUBNET_LOCAL, SUBNET_REMOTE, mtu)
@@ -89,7 +104,8 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT,
     local_mtu = get_base_mtu(remote_ip)
 
     ports = {"sync": sync_port, "wireguard": 51820, "vxlan": 4789,
-             "geneve": 6081, "l2tp": 5000, "stream": STREAM_PORT}
+             "geneve": 6081, "l2tp": 5000, "stream": STREAM_PORT, "holy": HOLY_BENCH_PORT}
+    holy_key = base64.urlsafe_b64encode(secrets.token_bytes(18)).decode().rstrip("=")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -131,6 +147,14 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT,
     results: List[Dict[str, Any]] = []
     dev = "tun_bench"
     stream_port = ports["stream"]
+    holder: Dict[str, Any] = {}
+
+    def _local_teardown():
+        proc = holder.pop("proc", None)
+        if proc is not None:
+            holy_runtime.stop_transient(proc, dev)
+        else:
+            TunnelDriver.cleanup_interface(dev)
 
     print(f"\nRunning {TEST_DURATION}s benchmark per protocol "
           f"(Local IP: {local_bind}, Remote IP: {remote_ip}, MTU: {safe_mtu})...\n")
@@ -141,24 +165,26 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT,
             sys.stdout.write(f"Testing {proto_name:<12} ")
             sys.stdout.flush()
 
-            send_msg(sock, {"action": "SETUP_TUNNEL", "proto": proto_id, "mtu": safe_mtu, "peer_wg_pub": wg_pub})
+            send_msg(sock, {"action": "SETUP_TUNNEL", "proto": proto_id, "mtu": safe_mtu,
+                            "peer_wg_pub": wg_pub, "holy_key": holy_key, "holy_port": ports["holy"]})
             rem_res = recv_msg(sock, timeout=20.0)
             if not rem_res or rem_res.get("status") != "OK":
                 print("[FAIL - Remote]")
                 continue
 
-            if not _setup_local(proto_id, dev, local_bind, remote_ip, safe_mtu, ports, wg_priv, remote_wg_pub):
+            if not _setup_local(proto_id, dev, local_bind, remote_ip, safe_mtu, ports,
+                                wg_priv, remote_wg_pub, holder=holder, holy_key=holy_key):
                 print("[FAIL - Local]")
-                TunnelDriver.cleanup_interface(dev)
+                _local_teardown()
                 send_msg(sock, {"action": "TEARDOWN_TUNNEL"})
                 recv_msg(sock, timeout=5.0)
                 continue
 
-            time.sleep(0.8)
+            time.sleep(1.5 if proto_id == "holy" else 0.8)
             ping_res = BenchmarkEngine.ping(SUBNET_LOCAL, SUBNET_REMOTE, count=6)
             if not ping_res["success"]:
                 print("[FAIL - Ping Timeout]")
-                TunnelDriver.cleanup_interface(dev)
+                _local_teardown()
                 send_msg(sock, {"action": "TEARDOWN_TUNNEL"})
                 recv_msg(sock, timeout=5.0)
                 results.append({"id": proto_id, "name": proto_name, "bandwidth": 0,
@@ -178,7 +204,7 @@ def run_client_mode(remote_ip: Optional[str] = None, sync_port: int = SYNC_PORT,
 
             send_msg(sock, {"action": "STOP_BANDWIDTH_TEST"})
             recv_msg(sock, timeout=3.0)
-            TunnelDriver.cleanup_interface(dev)
+            _local_teardown()
             send_msg(sock, {"action": "TEARDOWN_TUNNEL"})
             recv_msg(sock, timeout=5.0)
 

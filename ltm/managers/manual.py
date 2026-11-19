@@ -1,12 +1,16 @@
 """Interactive creation of a single tunnel on this host, with the exact
 counterpart command to paste on the remote server."""
 
+import json
 from typing import Optional
 
+from ..config import HOLY_CONFIG
 from ..core.system import run_cmd
 from ..core.netinfo import get_all_local_ips, get_route_ip, get_base_mtu, get_safe_mtu, get_default_gw
 from ..protocols.registry import PROTOCOLS
 from ..protocols.drivers import TunnelDriver, gen_wg_keys
+from . import holy as holy_mgr
+from . import persistence
 
 
 def _remote_command(proto_id, dev, local_bind, remote, my_ip, rem_ip, mtu, port, pub=""):
@@ -43,6 +47,86 @@ def _remote_command(proto_id, dev, local_bind, remote, my_ip, rem_ip, mtu, port,
     return f"Configure {proto_id} on {remote} with remote {local_bind} and IP {rem_ip}/30"
 
 
+def _create_holy(remote: str, local_bind: str):
+    """Create a persistent Holy endpoint (systemd service) and print the
+    exact settings for the opposite side."""
+    print("\nRole of THIS server:")
+    print("  1) Client (local side)")
+    print("  2) Server (foreign / exit side)")
+    role_sel = input("Select [1-2, Default: 1]: ").strip()
+    role = "server" if role_sel == "2" else "client"
+
+    port = input("UDP port [2096]: ").strip() or "2096"
+    secret = input("Shared key (blank = auto-generate): ").strip() or holy_mgr._gen_secret()
+    tun_name = input("Interface name [holy0]: ").strip() or "holy0"
+    mtu = int(input("MTU [1300]: ").strip() or "1300")
+
+    if role == "client":
+        my_ip = input("Local inner IP [10.200.0.2]: ").strip() or "10.200.0.2"
+        peer_ip = input("Remote inner IP [10.200.0.1]: ").strip() or "10.200.0.1"
+    else:
+        my_ip = input("Local inner IP [10.200.0.1]: ").strip() or "10.200.0.1"
+        peer_ip = input("Remote inner IP [10.200.0.2]: ").strip() or "10.200.0.2"
+
+    cfg = {
+        "role": role,
+        "secret": secret,
+        "tun_name": tun_name,
+        "tun_ip": my_ip,
+        "peer_ip": peer_ip,
+        "prefix": 30,
+        "mtu": mtu,
+        "keepalive": 15,
+    }
+    if local_bind and local_bind not in ("0.0.0.0", "127.0.0.1"):
+        cfg["local"] = local_bind
+    if role == "server":
+        bind = local_bind if local_bind and local_bind not in ("0.0.0.0", "127.0.0.1") else "0.0.0.0"
+        cfg["listen"] = f"{bind}:{port}"
+    else:
+        cfg["remote"] = f"{remote}:{port}"
+        gw, pdev = get_default_gw()
+        if gw and pdev and local_bind:
+            run_cmd(f"ip route replace {remote} via {gw} dev {pdev} src {local_bind} 2>/dev/null")
+
+    if not holy_mgr.build_core():
+        input("\nPress Enter to return...")
+        return
+
+    holy_mgr.save_config(cfg)
+    holy_mgr._open_udp(int(port))
+    holy_mgr.install_service()
+
+    # Opposite-side configuration for the other server.
+    other = dict(cfg)
+    other["role"] = "server" if role == "client" else "client"
+    other["tun_ip"], other["peer_ip"] = peer_ip, my_ip
+    other.pop("local", None)
+    other.pop("listen", None)
+    other.pop("remote", None)
+    if other["role"] == "server":
+        other["listen"] = f"0.0.0.0:{port}"
+    else:
+        other["remote"] = f"<THIS server public IP>:{port}"
+
+    print("\n" + "=" * 70)
+    print(">>> ON THE OTHER SERVER: menu 3 -> Holy Tunnel, enter the mirror")
+    print("    settings below (or write this config and restart the service): <<<")
+    print("-" * 70)
+    print(f"  role        : {other['role']}")
+    print(f"  UDP port    : {port}")
+    print(f"  shared key  : {secret}")
+    print(f"  local inner : {other['tun_ip']}")
+    print(f"  remote inner: {other['peer_ip']}")
+    if other["role"] == "client":
+        print(f"  server IP   : <THIS server public IP>")
+    print("-" * 70)
+    print(f"  # write {HOLY_CONFIG} then: systemctl restart holy-tunnel")
+    print("  " + json.dumps(other))
+    print("=" * 70)
+    input("\nPress Enter to return...")
+
+
 def manual_create_interactive(proto_id: str, proto_name: str, preset_remote: Optional[str] = None):
     remote = preset_remote or input("Remote Server IP: ").strip()
     if not remote:
@@ -65,6 +149,10 @@ def manual_create_interactive(proto_id: str, proto_name: str, preset_remote: Opt
         sel = input(f"Select Local IP for tunnel [Default: {default_ip}]: ").strip()
         if sel.strip():
             local_bind = sel.strip()
+
+    if proto_id == "holy":
+        _create_holy(remote, local_bind)
+        return
 
     mtu = get_safe_mtu(get_base_mtu(remote))
     gw, phys_dev = get_default_gw()
@@ -110,6 +198,14 @@ def manual_create_interactive(proto_id: str, proto_name: str, preset_remote: Opt
         run_cmd(f"iptables -I INPUT 1 -i {dev} -j ACCEPT 2>/dev/null")
         run_cmd(f"iptables -I FORWARD 1 -i {dev} -j ACCEPT 2>/dev/null")
         run_cmd(f"iptables -I FORWARD 1 -o {dev} -j ACCEPT 2>/dev/null")
+
+        # Persist so the tunnel is rebuilt automatically after a reboot.
+        defn = {"type": proto_id, "dev": dev, "local_bind": local_bind, "remote": remote,
+                "my_ip": my_ip, "peer_ip": rem_ip, "mtu": mtu, "port": port}
+        if proto_id == "wireguard":
+            defn["priv_key"] = priv
+            defn["peer_pub"] = peer_pub
+        persistence.save_tunnel(defn)
 
         print(f"\n[OK] Interface {dev} configured with routing on THIS server ({local_bind}).")
         print("=" * 70)

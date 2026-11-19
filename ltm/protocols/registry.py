@@ -1,6 +1,7 @@
 """Catalogue of the classic tunnel protocols the benchmark iterates over."""
 
 PROTOCOLS = [
+    {"id": "holy", "name": "Holy Tunnel", "layer": "L3", "port": 2096},
     {"id": "ipip", "name": "IPIP", "layer": "L3", "port": None},
     {"id": "gre", "name": "GRE", "layer": "L3", "port": None},
     {"id": "gretap", "name": "GRETAP", "layer": "L2", "port": None},

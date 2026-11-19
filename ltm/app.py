@@ -35,10 +35,20 @@ def main():
     parser.add_argument("--port", type=int, default=SYNC_PORT)
     parser.add_argument("--duration", type=int, default=TEST_DURATION)
     parser.add_argument("--create", choices=[p["id"] for p in PROTOCOLS])
+    parser.add_argument("--restore", action="store_true",
+                        help="rebuild persisted tunnels (used by the boot service)")
     args = parser.parse_args()
 
     check_root()
     ensure_state_dir()
+
+    # Boot-time restore must not register the benchmark cleanup, or it would
+    # tear down the very interfaces it just rebuilt.
+    if args.restore:
+        from .managers.persistence import restore_all
+        restore_all()
+        return
+
     _install_signal_handlers()
 
     target_ip = args.remote or args.remote_ip_alias

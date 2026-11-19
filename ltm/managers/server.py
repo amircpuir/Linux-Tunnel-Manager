@@ -3,7 +3,7 @@
 import shutil
 import socket
 
-from ..config import SYNC_PORT, STREAM_PORT, TEST_DURATION, SUBNET_LOCAL, SUBNET_REMOTE
+from ..config import SYNC_PORT, STREAM_PORT, TEST_DURATION, SUBNET_LOCAL, SUBNET_REMOTE, HOLY_BENCH_PORT
 from ..core.system import check_root, install_deps, optimize_sysctl
 from ..core.netinfo import (get_public_ip, get_route_ip, get_all_local_ips,
                             get_default_gw, get_base_mtu, get_safe_mtu)
@@ -12,6 +12,7 @@ from ..core.wire import send_msg, recv_msg
 from ..protocols.drivers import TunnelDriver, gen_wg_keys
 from ..protocols.cleanup import auto_cleanup
 from ..benchmark.engine import TcpReceiverThread, BenchmarkEngine
+from . import holy_runtime
 
 
 def _select_server_ip(preset_ip, local_ips, default_ip, pub_ip):
@@ -42,7 +43,19 @@ def _select_server_ip(preset_ip, local_ips, default_ip, pub_ip):
     return default_ip
 
 
-def _build_tunnel(proto, dev, peer_pub, local_route, mtu, configured_ports, wg_priv, peer_wg_pub, cmd):
+def _build_tunnel(proto, dev, peer_pub, local_route, mtu, configured_ports, wg_priv, peer_wg_pub, cmd, holder=None):
+    if proto == "holy":
+        if not holy_runtime.ensure_core():
+            return False
+        proc = holy_runtime.start_transient(
+            "server", dev, local_route, peer_pub,
+            cmd.get("holy_port", HOLY_BENCH_PORT), cmd.get("holy_key", ""),
+            SUBNET_REMOTE, SUBNET_LOCAL, mtu)
+        if proc is None:
+            return False
+        if holder is not None:
+            holder["proc"] = proc
+        return True
     if proto == "wireguard":
         return TunnelDriver.setup_wireguard(dev, wg_priv, peer_wg_pub or cmd.get("peer_wg_pub", ""),
                                             peer_pub, configured_ports.get("wireguard", 51820),
@@ -162,6 +175,14 @@ def _serve_one(conn, addr, bind_ip, pub_ip):
     dev = "tun_bench"
     peer_wg_pub = msg.get("wg_pub_key", "")
     active_rx = None
+    holder = {}
+
+    def _teardown_local():
+        proc = holder.pop("proc", None)
+        if proc is not None:
+            holy_runtime.stop_transient(proc, dev)
+        else:
+            TunnelDriver.cleanup_interface(dev)
 
     try:
         while True:
@@ -172,8 +193,9 @@ def _serve_one(conn, addr, bind_ip, pub_ip):
 
             if act == "SETUP_TUNNEL":
                 mtu = cmd.get("mtu", get_safe_mtu(base_mtu))
+                _teardown_local()  # drop any previous protocol's state first
                 ok = _build_tunnel(cmd.get("proto"), dev, peer_pub, local_route, mtu,
-                                   configured_ports, wg_priv, peer_wg_pub, cmd)
+                                   configured_ports, wg_priv, peer_wg_pub, cmd, holder=holder)
                 send_msg(conn, {"status": "OK" if ok else "FAIL"})
 
             elif act == "START_BANDWIDTH_TEST":
@@ -206,13 +228,15 @@ def _serve_one(conn, addr, bind_ip, pub_ip):
                     active_rx = None
                 from ..core.system import run_cmd
                 run_cmd("pkill -9 iperf3 2>/dev/null")
-                TunnelDriver.cleanup_interface(dev)
+                _teardown_local()
                 send_msg(conn, {"status": "OK"})
 
             elif act == "FINISH_SESSION":
+                _teardown_local()
                 auto_cleanup()
                 send_msg(conn, {"status": "BYE"})
                 break
     finally:
+        _teardown_local()
         conn.close()
         auto_cleanup()

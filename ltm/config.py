@@ -25,6 +25,15 @@ HOLY_CONFIG = os.path.join(HOLY_DIR, "config.json")
 HOLY_SERVICE = "holy-tunnel"
 HOLY_UNIT = f"/etc/systemd/system/{HOLY_SERVICE}.service"
 
+# UDP port used by Holy during a benchmark run (kept separate from any
+# installed Holy service so the test never disturbs a live tunnel).
+HOLY_BENCH_PORT = 2096
+
+# --- Persistence (restore every tunnel after a reboot) ----------------------
+TUNNELS_FILE = os.path.join(STATE_DIR, "tunnels.json")
+RESTORE_SERVICE = "ltm-restore"
+RESTORE_UNIT = f"/etc/systemd/system/{RESTORE_SERVICE}.service"
+
 # Kernel modules the classic protocols rely on.
 MODULES = [
     "ip_gre", "ip_tunnel", "gretap", "ipip", "tunnel4",
