@@ -19,6 +19,8 @@ from ..managers.holy import holy_menu
 def _banner():
     print("\n==================================")
     print(f" Linux Tunnel Manager  v{__version__}")
+    print("Telegram : Telhost1")
+    print("buy VPS : www.pasargadcloud.ir")
     print("==================================")
     print("1) Run Benchmark (Client)")
     print("2) Start Listener (Server)")
