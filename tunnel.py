@@ -1,73 +1,101 @@
-"""Top-level interactive menu."""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Linux Tunnel Manager — bootstrap launcher.
 
+This single file is what the one-line installer downloads. When executed it
+makes sure the full project is present on the machine (cloning or updating it
+under /opt), then hands control to the modular `ltm` package.
+
+Install / run:
+    curl -fsSL https://raw.githubusercontent.com/amircpuir/Linux-Tunnel-Manager/main/tunnel.py -o tunnel.py \
+        && chmod +x tunnel.py && sudo python3 tunnel.py
+"""
+
+import os
 import sys
-import time
+import shutil
+import subprocess
 
-from .. import __version__
-from ..config import SYNC_PORT
-from ..core.system import install_deps, optimize_sysctl
-from ..protocols.cleanup import auto_cleanup
-from ..managers.server import run_server_mode
-from ..managers.client import run_client_mode
-from ..managers.manual import manual_menu
-from ..managers.routing import tunnel_routing_menu
-from ..managers.tunnels import delete_tunnel_menu, change_tunnel_ip_menu
-from ..managers.portfwd import port_fwd_menu
-from ..managers.holy import holy_menu
+REPO_URL = "https://github.com/amircpuir/Linux-Tunnel-Manager.git"
+INSTALL_DIR = "/opt/Linux-Tunnel-Manager"
+RAW_BASE = "https://raw.githubusercontent.com/amircpuir/Linux-Tunnel-Manager/main"
 
 
-def _banner():
-    print("\n==================================")
-    print(f" Linux Tunnel Manager  v{__version__}")
-    print("Telegram : Telhost1")
-    print("buy VPS : www.pasargadcloud.ir")
-    print("==================================")
-    print("1) Run Benchmark (Client)")
-    print("2) Start Listener (Server)")
-    print("3) Create Tunnel")
-    print("4) Tunnel Routing & Forwarding")
-    print("5) Delete Tunnel")
-    print("6) Change Tunnel IP")
-    print("7) Port Forwarding")
-    print("8) Holy Tunnel")
-    print("9) Optimize Network")
-    print("c) Clean Interfaces")
-    print("0) Exit")
-    print("----------------------------------")
+def _is_root() -> bool:
+    return os.geteuid() == 0
 
 
-def main_menu(sync_port: int = SYNC_PORT):
-    while True:
-        _banner()
-        choice = input("Select option: ").strip().lower()
+def _have(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
 
-        if choice == "1":
-            run_client_mode(sync_port=sync_port)
-            input("\nPress Enter to return to menu...")
-        elif choice == "2":
-            p_in = input(f"Port [{SYNC_PORT}]: ").strip()
-            p = int(p_in) if p_in.isdigit() else SYNC_PORT
-            run_server_mode(port=p)
-            input("\nPress Enter to return to menu...")
-        elif choice == "3":
-            manual_menu()
-        elif choice == "4":
-            tunnel_routing_menu()
-        elif choice == "5":
-            delete_tunnel_menu()
-        elif choice == "6":
-            change_tunnel_ip_menu()
-        elif choice == "7":
-            port_fwd_menu()
-        elif choice == "8":
-            holy_menu()
-        elif choice == "9":
-            install_deps()
-            optimize_sysctl()
-            print("System optimized.")
-            time.sleep(1)
-        elif choice == "c":
-            auto_cleanup(verbose=True)
-        elif choice == "0":
-            auto_cleanup()
-            sys.exit(0)
+
+def _run(cmd: str) -> bool:
+    return subprocess.run(cmd, shell=True).returncode == 0
+
+
+def _ensure_git() -> bool:
+    if _have("git"):
+        return True
+    print("[*] Installing git...")
+    if _have("apt-get"):
+        _run("DEBIAN_FRONTEND=noninteractive apt-get update -qq && "
+             "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git")
+    elif _have("dnf"):
+        _run("dnf install -y -q git")
+    elif _have("yum"):
+        _run("yum install -y -q git")
+    return _have("git")
+
+
+def _sync_repo() -> bool:
+    """Clone the project on first run, or fast-forward it on later runs."""
+    if not _ensure_git():
+        print("[!] git is required but could not be installed.")
+        return False
+
+    if os.path.isdir(os.path.join(INSTALL_DIR, ".git")):
+        print(f"[*] Updating {INSTALL_DIR} ...")
+        _run(f"git -C '{INSTALL_DIR}' pull --ff-only --quiet")
+    else:
+        parent = os.path.dirname(INSTALL_DIR)
+        os.makedirs(parent, exist_ok=True)
+        if os.path.isdir(INSTALL_DIR):
+            shutil.rmtree(INSTALL_DIR, ignore_errors=True)
+        print(f"[*] Cloning project into {INSTALL_DIR} ...")
+        if not _run(f"git clone --depth 1 --quiet '{REPO_URL}' '{INSTALL_DIR}'"):
+            print("[!] Clone failed. Check your network connection and try again.")
+            return False
+    return True
+
+
+def _launch(target_dir: str):
+    """Replace this process with the package launcher so the menu is interactive."""
+    os.chdir(target_dir)
+    args = [sys.executable, "-m", "ltm"] + sys.argv[1:]
+    os.execvp(sys.executable, args)
+
+
+def main():
+    if not _is_root():
+        print("Error: Root privileges required. Run with sudo.")
+        sys.exit(1)
+
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    # Already inside a full checkout? Run it directly.
+    if os.path.isdir(os.path.join(here, "ltm")):
+        _launch(here)
+        return
+
+    # Otherwise bootstrap the project, then run it.
+    if not _sync_repo():
+        sys.exit(1)
+    if not os.path.isdir(os.path.join(INSTALL_DIR, "ltm")):
+        print("[!] Project layout unexpected after sync.")
+        sys.exit(1)
+    _launch(INSTALL_DIR)
+
+
+if __name__ == "__main__":
+    main()
